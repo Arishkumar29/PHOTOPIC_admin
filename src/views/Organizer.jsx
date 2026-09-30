@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { Home, PlusCircle, BarChart3, Settings, ArrowRight, CheckCircle2, Link as LinkIcon, Building2, Calendar, Copy, Loader2, Sparkles, UploadCloud, Trash2, Image as ImageIcon, Eye, Users, CalendarRange, MapPin, AlertCircle, Camera, Zap, X, Check } from 'lucide-react';
+import { Home, PlusCircle, BarChart3, Settings, ArrowRight, CheckCircle2, Link as LinkIcon, Building2, Calendar, Copy, Loader2, Sparkles, UploadCloud, Trash2, Image as ImageIcon, Eye, Users, CalendarRange, MapPin, AlertCircle, Camera, Zap, X, Check, ScanFace, FolderArchive, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { googleSignIn } from '../lib/auth';
 import { useAuth } from '../context/AuthContext';
-import { apiFetch } from '../lib/api';
+import { apiFetch, resolveMediaUrl } from '../lib/api';
 
 const PRESET_COVERS = [
   { id: 'celebration', name: 'Celebration', url: 'https://images.unsplash.com/photo-1519741497674-611481863552?w=500&auto=format&fit=crop&q=80' },
@@ -192,7 +191,6 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
   const [eventLocation, setEventLocation] = useState('');
   const [description, setDescription] = useState('');
   const [coverImage, setCoverImage] = useState(PRESET_COVERS[0].url);
-  const [cloudProvider, setCloudProvider] = useState('onedrive'); // 'onedrive' | 'gdrive'
   const [folderLink, setFolderLink] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [eventId, setEventId] = useState('');
@@ -200,6 +198,64 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
 
   const [errors, setErrors] = useState({});
   const wizardFileRef = useRef(null);
+
+  // ─── ZIP Download ──────────────────────────────────────────────────────────
+  // The server streams the archive, so the browser's own download bar shows progress.
+  const [zippingEventId, setZippingEventId] = useState(null);
+
+  const handleDownloadEventZip = (eventObj) => {
+    const { eventId, eventName } = eventObj;
+    const link = document.createElement('a');
+    link.href = resolveMediaUrl(`/api/events/${eventId}/download-zip`);
+    link.setAttribute('download', `${(eventName || 'event').replace(/[^a-zA-Z0-9_-]/g, '_')}_photos.zip`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setZippingEventId(eventId);
+    setTimeout(() => setZippingEventId(null), 4000);
+  };
+
+  // ─── Face Indexing ─────────────────────────────────────────────────────────
+  // Indexing runs on the server; the card polls its progress.
+  const [indexStatus, setIndexStatus] = useState({}); // eventId -> {state, done, total, faces}
+  const pollers = useRef({});
+
+  const watchIndexing = (eventId) => {
+    if (pollers.current[eventId]) return;
+    const poll = async () => {
+      try {
+        const res = await apiFetch(`/api/events/${eventId}/index-status`);
+        if (!res.ok) throw new Error();
+        const status = await res.json();
+        setIndexStatus((prev) => ({ ...prev, [eventId]: status }));
+        if (status.state === 'indexing') return;
+      } catch (e) {}
+      clearInterval(pollers.current[eventId]);
+      delete pollers.current[eventId];
+    };
+    pollers.current[eventId] = setInterval(poll, 3000);
+    poll();
+  };
+
+  useEffect(() => () => Object.values(pollers.current).forEach(clearInterval), []);
+
+  const cardStatus = (e) => indexStatus[e.eventId] || e.indexStatus || {};
+
+  const indexFacesForEvent = async (eventObj) => {
+    const { eventId } = eventObj;
+    setIndexStatus((prev) => ({ ...prev, [eventId]: { ...(prev[eventId] || {}), state: 'indexing' } }));
+    try {
+      const res = await apiFetch(`/api/events/${eventId}/index-faces`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not sync this Drive folder.');
+      setIndexStatus((prev) => ({ ...prev, [eventId]: data.indexStatus }));
+      watchIndexing(eventId);
+      fetchEvents();
+    } catch (err) {
+      setIndexStatus((prev) => ({ ...prev, [eventId]: { state: 'error', message: err.message } }));
+    }
+  };
+
 
   // Analytics sub-tabs
   const [analyticsSubTab, setAnalyticsSubTab] = useState('Analytics');
@@ -231,7 +287,7 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
   };
 
   useEffect(() => {
-    if (viewMode === 'analytics') {
+    if (viewMode === 'analytics' || viewMode === 'dashboard') {
       fetchAnalytics();
     }
   }, [viewMode, analyticsPeriod]);
@@ -246,6 +302,7 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
       const data = await res.json();
       if (data.events) {
         setEvents(data.events);
+        data.events.filter((ev) => ev.indexStatus?.state === 'indexing').forEach((ev) => watchIndexing(ev.eventId));
       }
     } catch (e) {
       console.error(e);
@@ -363,21 +420,8 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
     setIsSyncing(true);
     setSyncError('');
     try {
-      const isOneDrive = cloudProvider === 'onedrive' || folderLink.includes('1drv.ms') || folderLink.includes('onedrive.live.com') || folderLink.includes('sharepoint.com');
-      let folderId = folderLink.trim();
-      let accessToken = 'public_sync_token';
-
-      if (!isOneDrive) {
-        try {
-          const authResult = await googleSignIn();
-          if (authResult?.accessToken) accessToken = authResult.accessToken;
-        } catch (e) {
-          // non-fatal for public Google Drive links
-        }
-        const match = folderLink.match(/folders\/([a-zA-Z0-9-_]+)/);
-        if (match) folderId = match[1];
-      }
-      
+      // The backend accepts any Drive folder link and extracts the folder id itself.
+      const folderId = folderLink.trim();
       const newEventId = "evt_" + Math.random().toString(36).substring(2, 9);
       
       const response = await apiFetch('/api/create-event', {
@@ -386,7 +430,6 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
         body: JSON.stringify({
           eventId: newEventId,
           folderId,
-          accessToken,
           orgName: orgName || user?.displayName || 'GWC PhotoSync host',
           eventName: eventName,
           coverImage: coverImage
@@ -402,7 +445,6 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
       setStep(3);
       fetchEvents();
     } catch (err) {
-      if (err?.code === 'auth/popup-closed-by-user') return;
       console.error(err);
       setSyncError(err.message || 'Something went wrong. Please try again.');
     } finally {
@@ -467,8 +509,8 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
               {[
                 { label: 'Total Events', val: events.length },
                 { label: 'Photos Synced', val: totalPhotosSynced },
-                { label: 'Guests Reached', val: events.length * 14 },
-                { label: 'Downloads', val: events.length * 28 },
+                { label: `Gallery Visits (${analyticsPeriod}d)`, val: analyticsData.visits },
+                { label: `Downloads (${analyticsPeriod}d)`, val: analyticsData.downloads },
               ].map((stat) => (
                 <motion.div
                   key={stat.label}
@@ -520,7 +562,7 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                  {events.slice(0, 3).map((e, i) => (
+                  {events.map((e, i) => (
                     <motion.div
                       key={e.eventId}
                       whileInView={{ opacity: 1, y: 0 }}
@@ -536,8 +578,27 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                           <div className="w-full h-full flex items-center justify-center"><ImageIcon className="w-6 h-6 text-slate-400" /></div>
                         )}
                         <span className="absolute top-3 left-3 text-[9px] bg-white/90 text-slate-900 backdrop-blur font-bold px-2 py-0.5 rounded-full border border-slate-100 uppercase">
-                          {e.folderId === 'local_upload' ? 'Draft' : 'Live'}
+                          {e.photos?.length || 0} photos
                         </span>
+                        {/* Face index status badge */}
+                        {(() => {
+                          const st = cardStatus(e);
+                          const tone = st.state === 'ready'
+                            ? 'bg-emerald-50/90 text-emerald-700 border-emerald-200'
+                            : st.state === 'error'
+                              ? 'bg-red-50/90 text-red-700 border-red-200'
+                              : 'bg-amber-50/90 text-amber-700 border-amber-200';
+                          const label = st.state === 'ready' ? `Ready · ${st.faces} faces`
+                            : st.state === 'indexing' ? `Indexing ${st.done ?? 0}/${st.total ?? '…'}`
+                            : st.state === 'error' ? 'Sync failed'
+                            : st.state === 'partial' ? `${st.done}/${st.total} indexed`
+                            : 'Not indexed';
+                          return (
+                            <span className={`absolute top-3 right-3 text-[9px] backdrop-blur font-bold px-2 py-0.5 rounded-full border uppercase ${tone}`}>
+                              {label}
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div className="p-5 flex-1 flex flex-col justify-between">
                         <div>
@@ -551,7 +612,47 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                           >
                             Preview
                           </button>
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            {/* ZIP Download button */}
+                            <button
+                              onClick={() => handleDownloadEventZip(e)}
+                              disabled={zippingEventId === e.eventId}
+                              title={`Download all photos for "${e.eventName}" as a ZIP file`}
+                              className={`flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-lg transition-all cursor-pointer border ${
+                                zippingEventId === e.eventId
+                                  ? 'bg-purple-100 text-[#6e2b8b] border-purple-200 opacity-70 cursor-wait'
+                                  : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200 hover:text-slate-900'
+                              }`}
+                            >
+                              {zippingEventId === e.eventId ? (
+                                <>
+                                  <Loader2 className="w-3 h-3 animate-spin text-[#6e2b8b]" />
+                                  <span className="hidden sm:inline">Starting…</span>
+                                </>
+                              ) : (
+                                <>
+                                  <FolderArchive className="w-3 h-3 text-[#da7756]" />
+                                  <span className="hidden sm:inline">ZIP</span>
+                                </>
+                              )}
+                            </button>
+                            {/* Index Faces button */}
+                            <button
+                              onClick={() => indexFacesForEvent(e)}
+                              disabled={cardStatus(e).state === 'indexing'}
+                              title="Re-read the Google Drive folder and index any new photos"
+                              className={`flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-lg transition-all cursor-pointer border ${
+                                cardStatus(e).state === 'indexing'
+                                  ? 'bg-purple-100 text-[#6e2b8b] border-purple-200 opacity-70 cursor-not-allowed'
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                              }`}
+                            >
+                              {cardStatus(e).state === 'indexing' ? (
+                                <><Loader2 className="w-3 h-3 animate-spin" /><span className="hidden sm:inline">Indexing…</span></>
+                              ) : (
+                                <><ScanFace className="w-3 h-3" /><span className="hidden sm:inline">Sync photos</span></>
+                              )}
+                            </button>
                             <button 
                               onClick={() => openEditModal(e)}
                               className="text-xs font-semibold text-[#6e2b8b] hover:underline transition-colors cursor-pointer"
@@ -566,6 +667,27 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                             </button>
                           </div>
                         </div>
+                        {/* Indexing progress for this event card */}
+                        {(() => {
+                          const st = cardStatus(e);
+                          if (st.state === 'error') {
+                            return <p className="mt-3 text-[11px] text-red-600 font-medium">{st.message}</p>;
+                          }
+                          if (st.state !== 'indexing') return null;
+                          return (
+                            <div className="mt-3">
+                              <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-[#6e2b8b] to-[#da7756] rounded-full transition-all duration-500"
+                                  style={{ width: st.total ? `${(st.done / st.total) * 100}%` : '4%' }}
+                                />
+                              </div>
+                              <p className="text-[10px] text-slate-500 font-medium mt-1">
+                                Finding faces: {st.done ?? 0} of {st.total ?? '…'} photos · guests can already scan
+                              </p>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </motion.div>
                   ))}
@@ -810,69 +932,12 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                       </div>
                     </div>
 
-                    {/* Cloud Storage Provider Selector */}
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2.5">
-                        Choose Cloud Storage Provider
-                      </label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <button
-                          type="button"
-                          onClick={() => { setCloudProvider('onedrive'); setFolderLink(''); }}
-                          className={`flex items-center gap-3.5 p-4 rounded-2xl border-2 transition-all cursor-pointer text-left ${
-                            cloudProvider === 'onedrive'
-                              ? 'border-[#0078D4] bg-blue-50/50 shadow-sm ring-2 ring-[#0078D4]/20'
-                              : 'border-slate-200 bg-white hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="w-11 h-11 rounded-xl bg-[#0078D4]/10 text-[#0078D4] flex items-center justify-center font-bold text-xl shrink-0">
-                            ☁️
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-1.5 font-bold text-sm text-slate-900">
-                              Microsoft OneDrive
-                              <span className="text-[10px] bg-blue-100 text-[#0078D4] font-bold px-1.5 py-0.5 rounded-full">Recommended</span>
-                            </div>
-                            <div className="text-xs text-slate-500 font-medium">1drv.ms or onedrive.live.com</div>
-                          </div>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => { setCloudProvider('gdrive'); setFolderLink(''); }}
-                          className={`flex items-center gap-3.5 p-4 rounded-2xl border-2 transition-all cursor-pointer text-left ${
-                            cloudProvider === 'gdrive'
-                              ? 'border-[#6e2b8b] bg-purple-50/50 shadow-sm ring-2 ring-[#6e2b8b]/20'
-                              : 'border-slate-200 bg-white hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="w-11 h-11 rounded-xl bg-[#6e2b8b]/10 text-[#6e2b8b] flex items-center justify-center font-bold text-xl shrink-0">
-                            📁
-                          </div>
-                          <div>
-                            <div className="font-bold text-sm text-slate-900">Google Drive</div>
-                            <div className="text-xs text-slate-500 font-medium">drive.google.com folder</div>
-                          </div>
-                        </button>
-                      </div>
-                    </div>
-
                     {/* Step-by-step guidance */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      {cloudProvider === 'onedrive' ? [
-                        { n: '01', title: 'Open OneDrive', body: 'Go to onedrive.live.com and open or create your event folder or album.' },
-                        { n: '02', title: 'Share Folder', body: 'Right-click folder → Share → set access to “Anyone with the link can view”.' },
-                        { n: '03', title: 'Paste Link', body: 'Paste your 1drv.ms/… or OneDrive link below to index cloud photos.' },
-                      ].map((card) => (
-                        <div key={card.n} className="bg-white border border-blue-100 rounded-[1.5rem] p-5 text-slate-900 shadow-sm">
-                          <div className="text-2xl font-bold tracking-tight text-[#0078D4] mb-3">{card.n}</div>
-                          <h4 className="font-semibold text-base mb-1.5">{card.title}</h4>
-                          <p className="text-xs text-slate-500 leading-relaxed font-medium">{card.body}</p>
-                        </div>
-                      )) : [
-                        { n: '01', title: 'Open Drive', body: 'Go to drive.google.com and create or open a folder with your event photos.' },
-                        { n: '02', title: 'Share Folder', body: 'Right-click the folder → Share → set link access to “Anyone with link can view”.' },
-                        { n: '03', title: 'Paste Link', body: 'Copy the folder link and paste it in the field below to connect your gallery.' },
+                      {[
+                        { n: '01', title: 'Open Drive', body: 'Go to drive.google.com and open the folder with your event photos (subfolders are included).' },
+                        { n: '02', title: 'Share Folder', body: 'Share → General access → “Anyone with the link” (Viewer).' },
+                        { n: '03', title: 'Paste Link', body: 'Copy the folder link and paste it below. Photos are indexed automatically.' },
                       ].map((card) => (
                         <div key={card.n} className="bg-white border border-purple-100/70 rounded-[1.5rem] p-5 text-slate-900 shadow-sm">
                           <div className="text-2xl font-bold tracking-tight text-[#6e2b8b] mb-3">{card.n}</div>
@@ -884,25 +949,17 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
 
                     <div>
                       <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-3">
-                        {cloudProvider === 'onedrive' ? 'Microsoft OneDrive Shared Folder Link' : 'Google Drive Folder Link'}
+                        Google Drive Folder Link
                       </label>
                       <input 
                         type="text"
                         value={folderLink}
                         onChange={e => setFolderLink(e.target.value)}
-                        className={`w-full px-5 py-4 bg-white border-2 rounded-2xl focus:outline-none font-medium text-sm text-slate-900 placeholder:text-slate-400 transition-colors shadow-sm ${
-                          cloudProvider === 'onedrive'
-                            ? 'border-slate-200 focus:border-[#0078D4] focus:ring-2 focus:ring-[#0078D4]/20'
-                            : 'border-slate-200 focus:border-[#6e2b8b] focus:ring-2 focus:ring-[#6e2b8b]/20'
-                        }`}
-                        placeholder={
-                          cloudProvider === 'onedrive'
-                            ? 'https://1drv.ms/f/s!… or https://onedrive.live.com/…'
-                            : 'https://drive.google.com/drive/folders/…'
-                        }
+                        className="w-full px-5 py-4 bg-white border-2 border-slate-200 rounded-2xl focus:outline-none focus:border-[#6e2b8b] focus:ring-2 focus:ring-[#6e2b8b]/20 font-medium text-sm text-slate-900 placeholder:text-slate-400 transition-colors shadow-sm"
+                        placeholder="https://drive.google.com/drive/folders/…"
                       />
                       <p className="text-xs text-slate-400 font-medium mt-2">
-                        🔒 Stored securely in cloud storage. Local server disk storage is completely bypassed.
+                        Photos stay in your Google Drive; PhotoPic only reads them.
                       </p>
                     </div>
                   </motion.div>
@@ -1114,7 +1171,7 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                       { label: 'Gallery Visits', count: analyticsData.visits },
                       { label: 'Image Views', count: analyticsData.views },
                       { label: 'Image Downloads', count: analyticsData.downloads },
-                      { label: 'Unique Guests', count: analyticsData.faceScans },
+                      { label: 'Selfie Scans', count: analyticsData.faceScans },
                     ].map((metric) => (
                       <div key={metric.label} className="bg-white border border-slate-100 p-6 rounded-[2rem] flex flex-col justify-between min-h-[120px] hover:shadow-lg transition-all duration-300">
                         <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{metric.label}</span>
@@ -1269,7 +1326,7 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                 {/* Cloud Storage Folder Link */}
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5">
-                    Cloud Storage Link (OneDrive or Google Drive)
+                    Google Drive Folder Link
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
@@ -1279,12 +1336,12 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                       type="text"
                       value={editingEvent.folderId || ''}
                       onChange={e => setEditingEvent(prev => ({ ...prev, folderId: e.target.value }))}
-                      placeholder="https://1drv.ms/... or https://drive.google.com/drive/folders/..."
+                      placeholder="https://drive.google.com/drive/folders/..."
                       className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#6e2b8b]"
                     />
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1">
-                    Paste a new Microsoft OneDrive (1drv.ms/…) or Google Drive link to sync event photos from the cloud.
+                    Paste a different Google Drive folder link to replace this event's photos.
                   </p>
                 </div>
 
@@ -1357,7 +1414,29 @@ export function Organizer({ initialView = 'dashboard', onNavigate, onOpenPreview
                 </div>
 
                 {/* Actions */}
-                <div className="flex gap-3 pt-4 border-t border-slate-100">
+                <div className="flex gap-2.5 pt-4 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fullEv = events.find(x => x.eventId === editingEvent.eventId) || editingEvent;
+                      handleDownloadEventZip(fullEv);
+                    }}
+                    disabled={zippingEventId === editingEvent.eventId}
+                    className="px-4 py-3 bg-purple-50 hover:bg-purple-100 text-[#6e2b8b] font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer border border-purple-200/80 disabled:opacity-50 shrink-0"
+                    title="Download all photos in this gallery as a ZIP archive"
+                  >
+                    {zippingEventId === editingEvent.eventId ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#6e2b8b]" />
+                        <span>Starting download…</span>
+                      </>
+                    ) : (
+                      <>
+                        <FolderArchive className="w-3.5 h-3.5 text-[#da7756]" />
+                        <span>Download ZIP</span>
+                      </>
+                    )}
+                  </button>
                   <button
                     type="button"
                     onClick={() => setEditingEvent(null)}
