@@ -1,286 +1,227 @@
-import { useState, useEffect, useRef } from 'react';
-import { Organizer } from './views/Organizer';
-import { AuthView } from './views/AuthView';
-import { Settings } from './views/Settings';
-import { LivePreview } from './views/LivePreview';
-import { Menu, X, ChevronDown, LogOut, Settings as SettingsIcon, Shield } from 'lucide-react';
-import { Logo } from './components/Logo';
-import { Sidebar } from './components/Sidebar';
-import { useAuth } from './context/AuthContext';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { PageTransition } from './components/PageTransition';
-import { GridBackground } from './components/GridBackground';
+import { LayoutGrid, PlusCircle, MonitorSmartphone, BarChart3, Settings as SettingsIcon, LogOut, Menu, X, Search, CornerDownLeft, Loader2, Users } from 'lucide-react';
+import { useAuth } from './context/AuthContext';
+import { EventsProvider, useEvents } from './context/EventsContext';
+import { FeedbackProvider } from './components/ui';
+import { Login } from './views/Login';
+import { Dashboard } from './views/Dashboard';
+import { CreateEvent } from './views/CreateEvent';
+import { LivePreview } from './views/LivePreview';
+import { Analytics } from './views/Analytics';
+import { Settings } from './views/Settings';
+import { People } from './views/People';
 
-export default function App() {
-  const { user, logout } = useAuth();
+const NAV = [
+  { id: 'overview', label: 'Galleries', icon: LayoutGrid },
+  { id: 'new', label: 'New event', icon: PlusCircle },
+  { id: 'people', label: 'People', icon: Users },
+  { id: 'preview', label: 'Live preview', icon: MonitorSmartphone },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon },
+];
 
-  const [previewEventId, setPreviewEventId] = useState('');
+// Hash routes: #overview, #new, #people/<eventId>, #preview/<eventId>, #analytics/<eventId>, #settings
+function readRoute() {
+  const [page, param] = window.location.hash.replace(/^#\/?/, '').split('/');
+  return { page: NAV.some((n) => n.id === page) ? page : 'overview', param: param ? decodeURIComponent(param) : '' };
+}
 
-  const [activeTab, setActiveTab] = useState(() => {
-    const hash = window.location.hash.replace('#', '');
-    const validTabs = ['organizer', 'create_event', 'preview', 'analytics', 'settings', 'auth'];
-    if (validTabs.includes(hash)) return hash;
-    return 'organizer';
-  });
-
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const dropdownRef = useRef(null);
-
-  // Listen for browser Back and Forward navigation
+function useRoute() {
+  const [route, setRoute] = useState(readRoute);
   useEffect(() => {
-    const handlePopState = () => {
-      const hash = window.location.hash.replace('#', '');
-      const validTabs = ['organizer', 'create_event', 'preview', 'analytics', 'settings', 'auth'];
-      if (hash && validTabs.includes(hash)) {
-        setActiveTab(hash);
-      } else {
-        setActiveTab('organizer');
-      }
-    };
+    const onHash = () => { setRoute(readRoute()); document.getElementById('main')?.scrollTo({ top: 0 }); };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  const go = (page, param) => { window.location.hash = param ? `${page}/${encodeURIComponent(param)}` : page; };
+  return [route, go];
+}
 
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+function initials(name = '') {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'A';
+}
+
+function CommandPalette({ open, onClose, go }) {
+  const { events } = useEvents();
+  const [q, setQ] = useState('');
+  const [active, setActive] = useState(0);
+  const inputRef = useRef(null);
+
+  useEffect(() => { if (open) { setQ(''); setActive(0); setTimeout(() => inputRef.current?.focus(), 30); } }, [open]);
+
+  const items = useMemo(() => {
+    const pages = NAV.map((n) => ({ key: n.id, label: n.label, hint: 'Page', icon: n.icon, run: () => go(n.id) }));
+    const evs = events.flatMap((e) => [
+      { key: `p-${e.eventId}`, label: e.eventName, hint: 'Preview as guest', icon: MonitorSmartphone, run: () => go('preview', e.eventId) },
+      { key: `u-${e.eventId}`, label: e.eventName, hint: 'People', icon: Users, run: () => go('people', e.eventId) },
+      { key: `a-${e.eventId}`, label: e.eventName, hint: 'Analytics', icon: BarChart3, run: () => go('analytics', e.eventId) },
+    ]);
+    const all = [...pages, ...evs];
+    const needle = q.trim().toLowerCase();
+    return needle ? all.filter((i) => `${i.label} ${i.hint}`.toLowerCase().includes(needle)) : all.slice(0, 9);
+  }, [events, q, go]);
+
+  const run = (item) => { item?.run(); onClose(); };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div className="fixed inset-0 z-[80] bg-ink/30 backdrop-blur-[2px] flex items-start justify-center pt-[14vh] px-4"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+          <motion.div initial={{ y: -12, scale: 0.98 }} animate={{ y: 0, scale: 1 }} exit={{ y: -8, scale: 0.98 }}
+            className="w-full max-w-lg bg-card rounded-2xl shadow-2xl border border-line overflow-hidden">
+            <div className="flex items-center gap-3 px-4 border-b border-line">
+              <Search className="w-4 h-4 text-ink-3" />
+              <input ref={inputRef} value={q} onChange={(e) => { setQ(e.target.value); setActive(0); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, items.length - 1)); }
+                  if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+                  if (e.key === 'Enter') run(items[active]);
+                  if (e.key === 'Escape') onClose();
+                }}
+                placeholder="Jump to a page or event…" className="flex-1 py-4 bg-transparent outline-none text-[15px]" />
+              <kbd className="text-[10px] font-bold text-ink-3 border border-line rounded px-1.5 py-0.5">ESC</kbd>
+            </div>
+            <ul className="max-h-[50vh] overflow-y-auto p-2">
+              {items.length === 0 && <li className="px-3 py-6 text-center text-sm text-ink-3">Nothing matches "{q}"</li>}
+              {items.map((item, i) => (
+                <li key={item.key}>
+                  <button onMouseEnter={() => setActive(i)} onClick={() => run(item)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left text-sm ${i === active ? 'bg-paper-2' : ''}`}>
+                    <item.icon className="w-4 h-4 text-ink-3 shrink-0" />
+                    <span className="font-semibold truncate">{item.label}</span>
+                    <span className="ml-auto text-xs text-ink-3 shrink-0">{item.hint}</span>
+                    {i === active && <CornerDownLeft className="w-3.5 h-3.5 text-ink-3 shrink-0" />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function Sidebar({ page, go, onNavigate }) {
+  const { user, logout } = useAuth();
+  const { events } = useEvents();
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-6 pt-7 pb-6 border-b border-line">
+        <img src="/logo.png" alt="GWC DATA.AI" className="h-9 w-auto" />
+        <p className="eyebrow mt-4">PhotoPic · Organizer desk</p>
+      </div>
+
+      <nav className="flex-1 px-3 py-5 space-y-0.5" aria-label="Main">
+        {NAV.map((n, i) => {
+          const active = page === n.id;
+          return (
+            <button key={n.id} onClick={() => { go(n.id); onNavigate?.(); }} aria-current={active ? 'page' : undefined}
+              className={`relative w-full flex items-center gap-3 pl-4 pr-3 py-2.5 rounded-xl text-[14px] font-semibold text-left transition-colors ${active ? 'text-ink' : 'text-ink-2 hover:text-ink hover:bg-paper-2/70'}`}>
+              {active && <motion.span layoutId="nav-active" className="absolute inset-0 rounded-xl bg-card border border-line shadow-[0_2px_10px_-4px_rgba(29,26,23,.15)]" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
+              <span className={`relative font-display text-[13px] tabular-nums w-5 ${active ? 'text-coral' : 'text-ink-3'}`}>{String(i + 1).padStart(2, '0')}</span>
+              <n.icon className={`relative w-4 h-4 ${active ? 'text-plum' : 'text-ink-3'}`} />
+              <span className="relative">{n.label}</span>
+              {n.id === 'overview' && events.length > 0 && <span className="relative ml-auto text-[11px] font-bold text-ink-3 tabular-nums">{events.length}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="m-3 p-3 rounded-2xl border border-line bg-card flex items-center gap-3">
+        <div className="w-9 h-9 rounded-full bg-plum text-white grid place-items-center text-xs font-bold shrink-0">{initials(user?.name)}</div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold truncate">{user?.name}</p>
+          <p className="text-[11px] text-ink-3 truncate">{user?.email}</p>
+        </div>
+        <button onClick={logout} title="Sign out" aria-label="Sign out" className="p-2 rounded-lg text-ink-3 hover:text-rust hover:bg-rust-soft">
+          <LogOut className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Shell() {
+  const [{ page, param }, go] = useRoute();
+  const [drawer, setDrawer] = useState(false);
+  const [palette, setPalette] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Sync hash
-  useEffect(() => {
-    if (activeTab && activeTab !== 'auth') {
-      if (window.location.hash !== `#${activeTab}`) {
-        window.history.replaceState(null, '', `#${activeTab}`);
-      }
-    }
-  }, [activeTab]);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handleOutsideClick = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setDropdownOpen(false);
-      }
-    };
-    if (dropdownOpen) {
-      document.addEventListener('mousedown', handleOutsideClick);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleOutsideClick);
-    };
-  }, [dropdownOpen]);
-
-  const handleLogout = async () => {
-    try {
-      setDropdownOpen(false);
-      await logout();
-      setActiveTab('auth');
-    } catch (e) {
-      console.error('Logout error:', e);
-      setActiveTab('auth');
-    }
+  const views = {
+    overview: <Dashboard go={go} />,
+    new: <CreateEvent go={go} />,
+    people: <People eventId={param} go={go} />,
+    preview: <LivePreview eventId={param} go={go} />,
+    analytics: <Analytics eventId={param} go={go} />,
+    settings: <Settings />,
   };
 
-  const handleOpenPreviewForEvent = (eventObj) => {
-    if (eventObj?.eventId) {
-      setPreviewEventId(eventObj.eventId);
-    }
-    setActiveTab('preview');
-  };
-
-  const renderDashboardContent = () => {
-    switch (activeTab) {
-      case 'organizer':
-        return (
-          <PageTransition key="organizer-dash">
-            <Organizer 
-              initialView="dashboard" 
-              onNavigate={(tab) => setActiveTab(tab)} 
-              onOpenPreview={handleOpenPreviewForEvent}
-            />
-          </PageTransition>
-        );
-      case 'create_event':
-        return (
-          <PageTransition key="create-event-dash">
-            <Organizer 
-              initialView="create" 
-              onNavigate={(tab) => setActiveTab(tab)} 
-              onOpenPreview={handleOpenPreviewForEvent}
-            />
-          </PageTransition>
-        );
-      case 'preview':
-        return (
-          <PageTransition key="preview-dash">
-            <LivePreview defaultEventId={previewEventId} />
-          </PageTransition>
-        );
-      case 'analytics':
-        return (
-          <PageTransition key="analytics-dash">
-            <Organizer 
-              initialView="analytics" 
-              onNavigate={(tab) => setActiveTab(tab)} 
-              onOpenPreview={handleOpenPreviewForEvent}
-            />
-          </PageTransition>
-        );
-      case 'settings':
-        return (
-          <PageTransition key="settings">
-            <Settings onBack={() => setActiveTab('organizer')} />
-          </PageTransition>
-        );
-      default:
-        return (
-          <PageTransition key="default-dash">
-            <Organizer 
-              initialView="dashboard" 
-              onNavigate={(tab) => setActiveTab(tab)} 
-              onOpenPreview={handleOpenPreviewForEvent}
-            />
-          </PageTransition>
-        );
-    }
-  };
-
-  const getDashboardTitle = () => {
-    switch (activeTab) {
-      case 'organizer': return 'Dashboard';
-      case 'create_event': return 'Create Event';
-      case 'preview': return 'Live User Preview';
-      case 'analytics': return 'Analytics';
-      case 'settings': return 'Settings';
-      default: return 'Admin Dashboard';
-    }
-  };
-
-  // If not logged in, render Admin Login
-  if (!user || activeTab === 'auth') {
-    return (
-      <div className="min-h-screen bg-white text-slate-900 font-sans relative selection:bg-purple-100">
-        <GridBackground />
-        <PageTransition key="auth" className="w-full min-h-screen relative z-10 bg-transparent">
-          <AuthView onLoginSuccess={() => setActiveTab('organizer')} />
-        </PageTransition>
-      </div>
-    );
-  }
-
-  // Admin Dashboard Shell
   return (
-    <div className="w-full min-h-screen bg-white text-slate-900 font-sans flex flex-col md:flex-row selection:bg-purple-100 relative z-10">
-      <GridBackground />
+    <div className="min-h-screen bg-paper paper-grain lg:grid lg:grid-cols-[260px_minmax(0,1fr)]">
+      <aside className="hidden lg:block sticky top-0 h-screen border-r border-line bg-paper">
+        <Sidebar page={page} go={go} />
+      </aside>
 
-      {/* Sidebar */}
-      <Sidebar 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
-        mobileMenuOpen={mobileMenuOpen} 
-        setMobileMenuOpen={setMobileMenuOpen} 
-      />
+      {/* Mobile top bar + drawer */}
+      <header className="lg:hidden sticky top-0 z-40 flex items-center justify-between px-4 h-16 bg-paper/90 backdrop-blur border-b border-line">
+        <img src="/logo.png" alt="GWC DATA.AI" className="h-8 w-auto" />
+        <div className="flex items-center gap-1">
+          <button onClick={() => setPalette(true)} className="p-2.5 rounded-lg hover:bg-paper-2" aria-label="Search"><Search className="w-5 h-5" /></button>
+          <button onClick={() => setDrawer(true)} className="p-2.5 rounded-lg hover:bg-paper-2" aria-label="Open menu"><Menu className="w-5 h-5" /></button>
+        </div>
+      </header>
+      <AnimatePresence>
+        {drawer && (
+          <motion.div className="lg:hidden fixed inset-0 z-50 bg-ink/30" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDrawer(false)}>
+            <motion.aside initial={{ x: '-100%' }} animate={{ x: 0 }} exit={{ x: '-100%' }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+              className="absolute inset-y-0 left-0 w-[82%] max-w-[300px] bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setDrawer(false)} className="absolute top-5 right-4 p-2 rounded-lg hover:bg-paper-2" aria-label="Close menu"><X className="w-5 h-5" /></button>
+              <Sidebar page={page} go={go} onNavigate={() => setDrawer(false)} />
+            </motion.aside>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Mobile Header */}
-      <div className="md:hidden bg-white/90 backdrop-blur-xl border-b border-slate-100 h-16 px-6 flex items-center justify-between sticky top-0 z-40">
-        <Logo onClick={() => setActiveTab('organizer')} />
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => handleLogout()}
-            className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-red-50 text-red-600 border border-red-200/50 cursor-pointer"
-          >
-            Logout
-          </button>
-          <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="p-2 text-slate-500 rounded-lg">
-            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+      <main id="main" className="min-w-0 overflow-x-clip">
+        <div className="hidden lg:flex justify-end px-10 pt-6">
+          <button onClick={() => setPalette(true)} className="flex items-center gap-3 pl-3 pr-2 py-1.5 rounded-full border border-line bg-card text-sm text-ink-3 hover:border-ink-3 transition-colors">
+            <Search className="w-4 h-4" /> Jump to…
+            <kbd className="text-[10px] font-bold border border-line rounded-md px-1.5 py-0.5 bg-paper">Ctrl K</kbd>
           </button>
         </div>
-      </div>
-
-      {/* Main Content Area */}
-      <main id="content-container" className="flex-1 bg-white overflow-y-auto border-t md:border-t-0 md:border-l border-slate-100 relative z-20">
-        <header className="hidden md:flex bg-white/80 backdrop-blur-xl h-16 items-center px-10 sticky top-0 z-30 justify-between border-b border-slate-100">
-          <h1 className="text-base font-semibold tracking-tight text-slate-900">
-            {getDashboardTitle()}
-          </h1>
-          <div className="flex items-center gap-6">
-            {/* Admin Profile dropdown */}
-            <div className="relative" ref={dropdownRef}>
-              <button 
-                onClick={() => setDropdownOpen((prev) => !prev)}
-                className="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-slate-200 border border-slate-200/60 transition-all cursor-pointer select-none"
-                aria-expanded={dropdownOpen}
-              >
-                <span className="text-sm font-semibold text-slate-900">
-                  {user?.displayName || 'Admin Organizer'}
-                </span>
-                <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#6e2b8b] to-[#da7756] text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm">
-                  {user?.displayName ? user.displayName[0] : 'A'}
-                </div>
-                <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${dropdownOpen ? 'rotate-180' : ''}`} />
-              </button>
-              
-              <AnimatePresence>
-                {dropdownOpen && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 8, scale: 0.96 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 6, scale: 0.96 }}
-                    transition={{ type: 'spring', bounce: 0.15, duration: 0.2 }}
-                    className="absolute right-0 mt-2 w-64 bg-white/95 backdrop-blur-xl border border-slate-200 rounded-2xl shadow-xl p-1.5 z-50 text-left"
-                  >
-                    <div className="p-3 rounded-xl bg-slate-50 mb-1 border border-slate-100">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#6e2b8b] to-[#da7756] text-white flex items-center justify-center font-bold text-sm uppercase shadow-sm shrink-0">
-                          {user?.displayName ? user.displayName[0] : 'A'}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-bold text-slate-900 truncate">
-                            {user?.displayName || 'Admin Organizer'}
-                          </p>
-                          <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                            {user?.email || 'admin@photopic.app'}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          <Shield className="w-2.5 h-2.5" /> Super Admin
-                        </span>
-                        <span className="text-[10px] font-medium text-slate-400">Active</span>
-                      </div>
-                    </div>
-
-                    <div className="p-1 space-y-0.5">
-                      <button 
-                        onClick={() => { setActiveTab('settings'); setDropdownOpen(false); }}
-                        className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-50 rounded-xl transition-colors text-left cursor-pointer"
-                      >
-                        <SettingsIcon className="w-4 h-4 text-slate-400" />
-                        <span>Settings</span>
-                      </button>
-
-                      <div className="h-px bg-slate-100 my-1" />
-
-                      <button 
-                        onClick={handleLogout}
-                        className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 rounded-xl transition-colors text-left cursor-pointer"
-                      >
-                        <LogOut className="w-4 h-4 text-red-500" />
-                        <span>Sign Out</span>
-                      </button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          </div>
-        </header>
-
-        <div className="p-6 sm:p-10 max-w-[1400px] mx-auto min-h-[calc(100vh-4rem)] flex flex-col justify-between">
-          <div>
-            {renderDashboardContent()}
-          </div>
+        <div className="px-4 sm:px-8 lg:px-10 py-8 lg:pt-4 pb-20 max-w-[1320px] mx-auto">
+          <AnimatePresence mode="wait">
+            <motion.div key={page} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}>
+              {views[page]}
+            </motion.div>
+          </AnimatePresence>
         </div>
       </main>
+
+      <CommandPalette open={palette} onClose={() => setPalette(false)} go={go} />
     </div>
+  );
+}
+
+export default function App() {
+  const { user, checking } = useAuth();
+  if (checking && !user) {
+    return <div className="min-h-screen grid place-items-center bg-paper"><Loader2 className="w-6 h-6 animate-spin text-plum" /></div>;
+  }
+  return (
+    <FeedbackProvider>
+      {user ? <EventsProvider><Shell /></EventsProvider> : <Login />}
+    </FeedbackProvider>
   );
 }

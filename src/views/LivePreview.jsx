@@ -1,127 +1,90 @@
-import { useState, useEffect } from 'react';
-import { PublicGallery } from './PublicGallery';
-import { apiFetch } from '../lib/api';
-import { Sparkles, CheckCircle2, ChevronRight, RefreshCw, Eye } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import { ExternalLink, Laptop, RotateCcw, Smartphone, Upload } from 'lucide-react';
+import { useEvents } from '../context/EventsContext';
+import { GUEST_URL, guestLink } from '../lib/api';
+import { PageHeading, Segmented, StatusPill } from '../components/ui';
+import { Mascot, MascotState } from '../components/Mascot';
 
-export function LivePreview({ defaultEventId }) {
-  const [events, setEvents] = useState([]);
-  const [selectedEvent, setSelectedEvent] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
+const DEVICES = [
+  { value: 'phone', label: <span className="inline-flex items-center gap-1.5"><Smartphone className="w-3.5 h-3.5" /> Phone</span> },
+  { value: 'desktop', label: <span className="inline-flex items-center gap-1.5"><Laptop className="w-3.5 h-3.5" /> Desktop</span> },
+];
 
-  useEffect(() => {
-    fetchEvents();
-  }, []);
+export function LivePreview({ eventId, go }) {
+  const { events, loading, statusOf } = useEvents();
+  const [device, setDevice] = useState('phone');
+  const [reload, setReload] = useState(0);
+  const event = events.find((e) => e.eventId === eventId) || events[0];
 
-  const fetchEvents = async () => {
-    try {
-      const res = await apiFetch('/api/events');
-      const data = await res.json();
-      if (data.events && data.events.length > 0) {
-        setEvents(data.events);
-        const initial = defaultEventId 
-          ? data.events.find(e => e.eventId === defaultEventId) || data.events[0]
-          : data.events[0];
-        setSelectedEvent(initial);
-      }
-    } catch (e) {
-      console.error('Failed to load events in LivePreview:', e);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Keep the URL pointing at the event being previewed.
+  useEffect(() => { if (event && event.eventId !== eventId) go('preview', event.eventId); }, [event, eventId, go]);
 
-  const handleSelectEvent = (eventObj) => {
-    setSelectedEvent(eventObj);
-    // Clear selfie state so admin starts fresh on new event
-    try {
-      localStorage.removeItem('photopic_matched_photos');
-      localStorage.removeItem('photopic_selfie');
-      sessionStorage.removeItem('photopic_matched_photos');
-      sessionStorage.removeItem('photopic_selfie');
-    } catch (e) {}
-    setRefreshKey(prev => prev + 1);
-  };
-
-  const handleReset = () => {
-    try {
-      localStorage.removeItem('photopic_matched_photos');
-      localStorage.removeItem('photopic_selfie');
-      sessionStorage.removeItem('photopic_matched_photos');
-      sessionStorage.removeItem('photopic_selfie');
-    } catch (e) {}
-    setRefreshKey(prev => prev + 1);
-  };
-
-  if (loading) {
+  if (!loading && events.length === 0) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="flex items-center gap-3 text-sm font-semibold text-slate-500">
-          <div className="w-5 h-5 border-2 border-[#6e2b8b] border-t-transparent rounded-full animate-spin" />
-          <span>Loading Live Preview...</span>
-        </div>
-      </div>
+      <>
+        <PageHeading eyebrow="Live preview" title="See it as" accent="a guest." />
+        <MascotState pose="handshake" title="Nothing to preview yet" action={<button onClick={() => go('new')} className="btn-plum">Create an event</button>}>
+          Create an event first, then test the selfie flow here.
+        </MascotState>
+      </>
     );
   }
 
-  if (events.length === 0) {
-    return (
-      <div className="bg-slate-50 border border-slate-100 rounded-[2rem] p-12 text-center space-y-3">
-        <h3 className="text-xl font-bold text-slate-900">No Events Available</h3>
-        <p className="text-sm font-medium text-slate-500">Create an event in the Dashboard first to test the selfie and results experience.</p>
-      </div>
-    );
-  }
+  const src = event ? `${guestLink(event.eventId)}&preview=${reload}` : '';
 
   return (
-    <div className="w-full text-slate-900 font-sans text-left space-y-6">
-      
-      {/* Top Event Selector Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-200/60 shadow-sm">
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-400 shrink-0 mr-1">
-            Testing Event:
-          </span>
-          {events.map((ev) => {
-            const isSelected = selectedEvent?.eventId === ev.eventId;
-            return (
-              <button
-                key={ev.eventId}
-                onClick={() => handleSelectEvent(ev)}
-                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-all cursor-pointer border ${
-                  isSelected
-                    ? 'bg-purple-100/80 border-purple-200 text-[#6e2b8b] font-bold shadow-xs'
-                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#6e2b8b]" />}
-                <span>{ev.eventName}</span>
-              </button>
-            );
-          })}
+    <>
+      <PageHeading eyebrow="Live preview" title="See it as" accent="a guest.">
+        <Segmented id="device" options={DEVICES} value={device} onChange={setDevice} />
+        <button onClick={() => setReload((r) => r + 1)} className="btn-ghost py-2" title="Reload the guest page"><RotateCcw className="w-4 h-4" /> Reload</button>
+        {event && <a href={guestLink(event.eventId)} target="_blank" rel="noreferrer" className="btn-ghost py-2"><ExternalLink className="w-4 h-4" /> New tab</a>}
+      </PageHeading>
+
+      <div className="grid xl:grid-cols-[280px_minmax(0,1fr)] gap-8 items-start">
+        <aside className="space-y-5">
+          <div>
+            <p className="eyebrow mb-3">Event</p>
+            <ul className="space-y-1.5 max-h-[45vh] overflow-y-auto scrollbar-none">
+              {events.map((e) => {
+                const active = e.eventId === event?.eventId;
+                return (
+                  <li key={e.eventId}>
+                    <button onClick={() => go('preview', e.eventId)}
+                      className={`w-full text-left px-3.5 py-3 rounded-xl border transition-colors ${active ? 'bg-card border-ink shadow-sm' : 'border-transparent hover:bg-card hover:border-line'}`}>
+                      <p className="font-bold truncate">{e.eventName}</p>
+                      <div className="mt-1.5"><StatusPill status={statusOf(e)} /></div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+          <div className="card p-4 pt-3 text-sm text-ink-2 leading-relaxed relative overflow-hidden">
+            <Mascot pose="rocket" className="w-24 -mb-1 -ml-1" />
+            <p className="font-bold text-ink flex items-center gap-2 mb-1.5"><Upload className="w-4 h-4 text-coral" /> Testing tip</p>
+            Use <b>Upload a photo</b> on the guest page to test with any picture of an attendee, no camera needed.
+          </div>
+          {!GUEST_URL && <p className="text-xs text-amber bg-amber-soft rounded-lg px-3 py-2">Set <code>VITE_GUEST_URL</code> in the admin build to the deployed guest app.</p>}
+        </aside>
+
+        <div className="flex justify-center">
+          <AnimatePresence mode="wait">
+            <motion.div key={device} initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.3 }}
+              className={device === 'phone'
+                ? 'w-[390px] max-w-full h-[780px] max-h-[80vh] rounded-[46px] bg-ink p-3 shadow-[0_40px_80px_-40px_rgba(29,26,23,.7)]'
+                : 'w-full rounded-2xl bg-ink pt-8 px-1.5 pb-1.5 shadow-[0_40px_80px_-40px_rgba(29,26,23,.7)] relative'}>
+              {device === 'desktop' && (
+                <div className="absolute top-2.5 left-4 flex gap-1.5">{['#e5776a', '#e6b94f', '#7cbf6e'].map((c) => <span key={c} className="w-3 h-3 rounded-full" style={{ background: c }} />)}</div>
+              )}
+              {src && (
+                <iframe key={src} src={src} title="Guest page preview" allow="camera; clipboard-write"
+                  className={`w-full bg-paper ${device === 'phone' ? 'h-full rounded-[36px]' : 'h-[72vh] rounded-xl'}`} />
+              )}
+            </motion.div>
+          </AnimatePresence>
         </div>
-
-        {/* Reset / Fresh Selfie Scan button */}
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-2 px-3.5 py-2 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 transition-colors shadow-2xs shrink-0 cursor-pointer self-start sm:self-auto"
-        >
-          <RefreshCw className="w-3.5 h-3.5 text-slate-500" />
-          <span>New Selfie Test</span>
-        </button>
       </div>
-
-      {/* Native Embedded Public Gallery (Selfie Capture & Results View) */}
-      <div className="w-full bg-white rounded-[2.5rem] border border-slate-100 shadow-sm p-4 sm:p-8 min-h-[600px]">
-        {selectedEvent && (
-          <PublicGallery
-            key={`${selectedEvent.eventId}-${refreshKey}`}
-            eventData={selectedEvent}
-            onBack={() => handleReset()}
-          />
-        )}
-      </div>
-
-    </div>
+    </>
   );
 }

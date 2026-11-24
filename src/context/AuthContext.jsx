@@ -1,35 +1,63 @@
-import { createContext, useContext, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { api, getToken, setToken, UNAUTHORIZED_EVENT } from '../lib/api';
 
-const AuthContext = createContext();
+const AuthContext = createContext(null);
+const USER_KEY = 'photopic_admin_user';
+
+function savedUser() {
+  try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null'); } catch { return null; }
+}
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const savedUser = localStorage.getItem('mock_user');
-      return savedUser ? JSON.parse(savedUser) : null;
-    } catch {
-      return null;
-    }
-  });
+  // Show the cached user immediately, then confirm the token with the server.
+  const [user, setUser] = useState(() => (getToken() ? savedUser() : null));
+  const [checking, setChecking] = useState(() => Boolean(getToken()));
+  const [expired, setExpired] = useState(false);
 
-  const login = (displayName, email) => {
-    const mockUser = {
-      displayName: displayName || email?.split('@')[0] || 'Admin Organizer',
-      email: email || 'admin@photopic.app',
-      photoURL: null,
-      uid: 'mock-admin-id'
-    };
-    setUser(mockUser);
-    localStorage.setItem('mock_user', JSON.stringify(mockUser));
-  };
-
-  const logout = () => {
+  const clear = useCallback(() => {
+    setToken(null);
+    try { localStorage.removeItem(USER_KEY); } catch {}
     setUser(null);
-    localStorage.removeItem('mock_user');
+  }, []);
+
+  useEffect(() => {
+    if (!getToken()) return;
+    api('/api/auth/me')
+      .then(({ user }) => {
+        setUser(user);
+        try { localStorage.setItem(USER_KEY, JSON.stringify(user)); } catch {}
+      })
+      .catch((err) => {
+        // Keep the cached session if the server is merely unreachable.
+        if (!/reach/i.test(err.message)) { clear(); setExpired(true); }
+      })
+      .finally(() => setChecking(false));
+  }, [clear]);
+
+  useEffect(() => {
+    const onUnauthorized = () => { clear(); setExpired(true); };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, [clear]);
+
+  // `beforeEnter` lets the login screen play its success animation before the app swaps in.
+  const login = async (email, password, beforeEnter) => {
+    const data = await api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    await beforeEnter?.(data.user);
+    setToken(data.token);
+    try { localStorage.setItem(USER_KEY, JSON.stringify(data.user)); } catch {}
+    setExpired(false);
+    setUser(data.user);
+    return data.user;
   };
+
+  const logout = () => { clear(); setExpired(false); };
 
   return (
-    <AuthContext.Provider value={{ user, loading: false, login, logout, USE_FIREBASE: false }}>
+    <AuthContext.Provider value={{ user, checking, expired, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
